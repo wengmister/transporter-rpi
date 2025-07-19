@@ -1,4 +1,4 @@
-# Xbox Controller Joystick Visualizer - Setup Instructions
+# Xbox Controller VESC Robot Controller - Setup Instructions
 
 ## Prerequisites
 
@@ -6,6 +6,8 @@
 2. **Xbox Controller** (Xbox 360, Xbox One, or Xbox Series X/S)
 3. **USB cable** to connect controller to Pi
 4. **Display** connected to Pi (HDMI monitor or Pi touchscreen)
+5. **Two VESC motor controllers** connected via USB (/dev/ttyACM0 and /dev/ttyACM1)
+6. **Differential drive robot** with motors connected to VESCs
 
 ## Installation Steps
 
@@ -19,8 +21,11 @@ sudo apt update && sudo apt upgrade -y
 # Install pygame dependencies
 sudo apt install python3-pygame python3-pip -y
 
+# Install PyVESC for motor control
+pip3 install pygame pyvesc
+
 # Alternative method if pygame isn't available via apt:
-pip3 install pygame
+# pip3 install pygame pyvesc
 ```
 
 ### 3. Set Up Controller Permissions
@@ -43,10 +48,13 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-### 4. Test Controller Connection
+### 4. Test Controller and VESC Connection
 ```bash
 # Check if controller is detected
 lsusb | grep -i xbox
+
+# Check VESC connections
+ls /dev/ttyACM*
 
 # Test joystick detection
 python3 -c "
@@ -61,32 +69,54 @@ if pygame.joystick.get_count() > 0:
     print(f'Axes: {j.get_numaxes()}')
     print(f'Buttons: {j.get_numbuttons()}')
 "
+
+# Test VESC connection (optional)
+python3 -c "
+from pyvesc.VESC import VESC
+try:
+    with VESC('/dev/ttyACM0') as vesc:
+        print('VESC 1 connected successfully')
+    with VESC('/dev/ttyACM1') as vesc:
+        print('VESC 2 connected successfully')
+except Exception as e:
+    print(f'VESC connection test failed: {e}')
+"
 ```
 
-### 5. Run the Visualizer
+### 5. Run the Robot Controller
 ```bash
 # Make the script executable
-chmod +x xbox_joystick_viz.py
+chmod +x xbox_vesc_robot_controller.py
 
-# Run the visualizer
-python3 xbox_joystick_viz.py
+# Run the controller
+python3 xbox_vesc_robot_controller.py
 ```
 
 ## Usage
 
 1. **Connect your Xbox controller** via USB to the Raspberry Pi
-2. **Run the script** - it will automatically detect the controller
-3. **Move the left joystick** to see the real-time arrow visualization
-4. **Check the console** for logged joystick values
-5. **Press ESC or close the window** to exit
+2. **Connect VESC controllers** to /dev/ttyACM0 and /dev/ttyACM1
+3. **Ensure robot is in safe area** before running
+4. **Run the script** - it will auto-detect controller and VESCs
+5. **Use left joystick** to control robot movement:
+   - **Up/Down**: Forward/Backward
+   - **Left/Right**: Turn left/right
+   - **Diagonal**: Combined movement
+6. **Safety controls**:
+   - **B Button**: Emergency stop
+   - **A Button**: Release emergency stop
+   - **Spacebar**: Emergency stop (keyboard)
+   - **ESC**: Exit program
 
-## Features
+## Robot Control Features
 
-- **Real-time visualization** of left joystick input
-- **Arrow display** showing magnitude and direction
-- **Console logging** of X/Y values, magnitude, and angle
-- **Deadzone handling** to ignore small movements
-- **60 FPS smooth updates**
+- **Differential drive logic** - converts joystick to left/right motor speeds
+- **Real-time visualization** of joystick input and motor outputs
+- **Emergency stop system** with multiple activation methods
+- **Threaded motor control** for smooth, non-blocking operation
+- **Safety limits** - maximum 80% duty cycle by default
+- **Deadzone handling** - ignores small joystick movements
+- **Visual motor indicators** showing direction and power level
 
 ## Troubleshooting
 
@@ -101,15 +131,13 @@ python3 xbox_joystick_viz.py
 - Try running with `sudo` (not recommended for regular use)
 - Check udev rules are properly set
 
-### Performance Issues
-- Reduce FPS in the code (change `clock.tick(60)` to lower value)
-- Close other applications to free up resources
-- Consider running without desktop environment for better performance
-
-### Display Issues
-- Ensure HDMI display is connected and configured
-- For headless setup, you'll need to modify the code to remove pygame display
-- Check display resolution settings
+### VESC Connection Issues
+- Check USB connections to both VESC controllers
+- Verify ports: `ls /dev/ttyACM*` should show ACM0 and ACM1
+- Try different USB ports
+- Check VESC configuration and firmware
+- Ensure VESCs are powered and motors connected
+- Script will run in visualization-only mode if VESCs not connected
 
 ## Controller Compatibility
 
@@ -119,20 +147,29 @@ This script works with:
 - Xbox Series X/S Controller (wired)
 - Many third-party Xbox-compatible controllers
 
-## Customization
+## Configuration Options
 
-You can modify the following in the code:
-- `WINDOW_WIDTH/HEIGHT` - Change display size
-- `ARROW_COLOR` - Change arrow color
-- `DEADZONE` - Adjust joystick sensitivity
-- `ARROW_MAX_LENGTH` - Change maximum arrow length
-- Logging frequency and format
+You can modify these settings in the code:
+
+### Motor Control Settings
+- `MAX_SPEED = 0.8` - Maximum motor duty cycle (0.8 = 80%)
+- `SPEED_MULTIPLIER = 1.0` - Joystick sensitivity
+- `DEADZONE = 0.15` - Minimum joystick movement to register
+- `VESC_PORT_1/2` - USB ports for left/right motors
+
+### Display Settings
+- `WINDOW_WIDTH/HEIGHT` - Window size
+- `ARROW_COLOR` - Joystick arrow color
+- `MOTOR_COLOR_LEFT/RIGHT` - Motor indicator colors
+
+### Safety Settings
+- Emergency stop activated by: B button, Spacebar, or code emergency_stop flag
+- Motors automatically stop on program exit
+- Threaded motor control prevents blocking
 
 ## Next Steps
 
-To extend this project, you could:
-- Add right joystick visualization
-- Include button press indicators
-- Log data to file for analysis
-- Add network streaming of joystick data
-- Create a web interface for remote monitoring
+- Camera & Visualization
+    - Object detection (YOLO)
+    - Obstacle avoidance (need depth)
+- Mechanical integration
