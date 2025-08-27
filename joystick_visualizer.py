@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Xbox Controller VESC Differential Drive Robot Controller
-Combines joystick visualization with VESC motor control for differential drive robot
+Xbox Controller VESC Differential Drive Robot Controller - Direct Control Version
+Direct motor control with comprehensive latency logging
 """
 
 import pygame
@@ -10,8 +10,8 @@ import sys
 import time
 import os
 from pyvesc.VESC import VESC
-import threading
-import queue
+from collections import deque
+import statistics
 
 # Initialize Pygame
 pygame.init()
@@ -37,14 +37,19 @@ VESC_PORT_2 = '/dev/ttyACM1'  # Right motor
 MAX_SPEED = 0.8  # Maximum duty cycle (80% for safety)
 SPEED_MULTIPLIER = 1.0  # Joystick sensitivity
 
+# Logging Configuration
+LATENCY_LOG_INTERVAL = 1.0  # Log statistics every second
+LATENCY_HISTORY_SIZE = 100  # Keep last 100 measurements for statistics
+
 class RobotController:
     def __init__(self):
         # Pygame setup
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption("Xbox VESC Robot Controller")
+        pygame.display.set_caption("Xbox VESC Robot Controller - Direct Control")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 28)
         self.large_font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 20)
         
         # Initialize joystick
         pygame.joystick.init()
@@ -67,10 +72,22 @@ class RobotController:
         self.vesc_connected = False
         self.emergency_stop = False
         
-        # Threading for VESC communication
-        self.motor_queue = queue.Queue()
-        self.motor_thread = None
-        self.running = False
+        # Latency tracking
+        self.joystick_read_times = deque(maxlen=LATENCY_HISTORY_SIZE)
+        self.motor_command_times = deque(maxlen=LATENCY_HISTORY_SIZE)
+        self.total_loop_times = deque(maxlen=LATENCY_HISTORY_SIZE)
+        self.last_latency_log = time.time()
+        self.command_counter = 0
+        self.last_motor_update = time.time()
+        self.motor_update_interval = deque(maxlen=LATENCY_HISTORY_SIZE)
+        
+        # Performance stats for display
+        self.avg_joystick_time = 0
+        self.avg_motor_time = 0
+        self.avg_loop_time = 0
+        self.avg_update_rate = 0
+        self.max_motor_time = 0
+        self.motor_timeouts = 0
         
         # Initialize VESC
         self.init_vesc()
@@ -87,60 +104,56 @@ class RobotController:
         self.joystick.init()
         
         print(f"Joystick connected: {self.joystick.get_name()}")
+        print(f"Number of axes: {self.joystick.get_numaxes()}")
+        print(f"Number of buttons: {self.joystick.get_numbuttons()}")
         return True
     
     def init_vesc(self):
         """Initialize VESC connections"""
+        print("\n=== VESC Initialization ===")
         print("Checking VESC ports...")
         os.system("ls /dev/ttyACM*")
         
         try:
-            print(f"Connecting to VESC motors on {VESC_PORT_1} and {VESC_PORT_2}...")
+            print(f"\nConnecting to VESC motors:")
+            print(f"  Left motor:  {VESC_PORT_1}")
+            print(f"  Right motor: {VESC_PORT_2}")
+            
+            # Time the connection process
+            conn_start = time.time()
             self.vesc1 = VESC(serial_port=VESC_PORT_1)
+            left_conn_time = time.time() - conn_start
+            print(f"  Left motor connected in {left_conn_time:.3f}s")
+            
+            conn_start = time.time()
             self.vesc2 = VESC(serial_port=VESC_PORT_2)
+            right_conn_time = time.time() - conn_start
+            print(f"  Right motor connected in {right_conn_time:.3f}s")
             
             # Test connection by setting duty cycle to 0
+            test_start = time.time()
             self.vesc1.set_duty_cycle(0)
             self.vesc2.set_duty_cycle(0)
+            test_time = time.time() - test_start
+            print(f"  Initial stop command sent in {test_time:.3f}s")
             
             self.vesc_connected = True
-            print("VESC motors connected successfully!")
-            
-            # Start motor control thread
-            self.running = True
-            self.motor_thread = threading.Thread(target=self.motor_control_loop, daemon=True)
-            self.motor_thread.start()
+            print("\n✓ VESC motors connected successfully!")
+            print("===========================\n")
             
         except Exception as e:
-            print(f"Failed to connect to VESC motors: {e}")
+            print(f"\n✗ Failed to connect to VESC motors: {e}")
             print("Running in visualization-only mode")
+            print("===========================\n")
             self.vesc_connected = False
     
-    def motor_control_loop(self):
-        """Separate thread for motor control to avoid blocking"""
-        while self.running and self.vesc_connected:
-            try:
-                if not self.motor_queue.empty():
-                    left_duty, right_duty = self.motor_queue.get()
-                    
-                    if self.emergency_stop:
-                        left_duty = 0.0
-                        right_duty = 0.0
-                    
-                    self.vesc1.set_duty_cycle(left_duty)
-                    self.vesc2.set_duty_cycle(right_duty)
-                    
-                time.sleep(0.02)  # 50Hz update rate for motors
-                
-            except Exception as e:
-                print(f"Motor control error: {e}")
-                break
-    
     def update_joystick_state(self):
-        """Read and update joystick state"""
+        """Read and update joystick state with timing"""
         if not self.joystick:
             return
-            
+        
+        start_time = time.time()
+        
         # Get left joystick axes
         raw_x = self.joystick.get_axis(0)  # Left/right
         raw_y = -self.joystick.get_axis(1)  # Forward/back (inverted)
@@ -163,17 +176,16 @@ class RobotController:
         else:
             self.angle = 0.0
         
-        # Calculate differential drive values
-        self.calculate_differential_drive()
+        # Track joystick read time
+        joystick_time = time.time() - start_time
+        self.joystick_read_times.append(joystick_time)
         
-        # Log the values
-        print(f"Joystick X: {self.x_axis:6.3f}, Y: {self.y_axis:6.3f} | "
-              f"Speed: {self.speed:6.3f}, Turn: {self.turn:6.3f} | "
-              f"L: {self.left_motor_duty:6.3f}, R: {self.right_motor_duty:6.3f}")
+        # Calculate differential drive and send to motors
+        self.calculate_and_send_motor_commands()
     
-    def calculate_differential_drive(self):
-        """Calculate differential drive motor values from joystick input"""
-        # Convert joystick to speed and turn
+    def calculate_and_send_motor_commands(self):
+        """Calculate differential drive and directly send to motors with timing"""
+        # Calculate differential drive values
         self.speed = self.y_axis * SPEED_MULTIPLIER  # Forward/backward
         self.turn = self.x_axis * SPEED_MULTIPLIER   # Left/right turn
         
@@ -189,12 +201,44 @@ class RobotController:
         self.left_motor_duty = left_speed * MAX_SPEED
         self.right_motor_duty = right_speed * MAX_SPEED
         
-        # Send to motor control thread
-        if self.vesc_connected and not self.motor_queue.full():
+        # Send directly to motors with timing
+        if self.vesc_connected:
+            motor_start = time.time()
+            
             try:
-                self.motor_queue.put((self.left_motor_duty, self.right_motor_duty), block=False)
-            except queue.Full:
-                pass  # Skip this update if queue is full
+                if self.emergency_stop:
+                    self.vesc1.set_duty_cycle(0)
+                    self.vesc2.set_duty_cycle(0)
+                else:
+                    # Send commands to both motors
+                    self.vesc1.set_duty_cycle(self.left_motor_duty)
+                    self.vesc2.set_duty_cycle(self.right_motor_duty)
+                
+                # Track timing
+                motor_time = time.time() - motor_start
+                self.motor_command_times.append(motor_time)
+                self.max_motor_time = max(self.max_motor_time, motor_time)
+                
+                # Track update interval
+                current_time = time.time()
+                interval = current_time - self.last_motor_update
+                self.motor_update_interval.append(interval)
+                self.last_motor_update = current_time
+                
+                # Increment command counter
+                self.command_counter += 1
+                
+                # Warn if motor command is slow
+                if motor_time > 0.05:  # 50ms warning threshold
+                    print(f"⚠ Slow motor command: {motor_time:.3f}s (L:{self.left_motor_duty:.2f}, R:{self.right_motor_duty:.2f})")
+                
+                if motor_time > 0.1:  # 100ms critical threshold
+                    print(f"⚠⚠ CRITICAL: Motor command took {motor_time:.3f}s!")
+                    self.motor_timeouts += 1
+                    
+            except Exception as e:
+                print(f"✗ Motor control error: {e}")
+                self.motor_timeouts += 1
     
     def handle_buttons(self):
         """Handle controller button presses"""
@@ -205,12 +249,15 @@ class RobotController:
         if self.joystick.get_button(1):  # B button
             if not self.emergency_stop:
                 self.emergency_stop = True
-                print("EMERGENCY STOP ACTIVATED!")
+                print("🛑 EMERGENCY STOP ACTIVATED!")
                 # Send stop command immediately
                 if self.vesc_connected:
                     try:
+                        start = time.time()
                         self.vesc1.set_duty_cycle(0)
                         self.vesc2.set_duty_cycle(0)
+                        stop_time = time.time() - start
+                        print(f"  Stop command sent in {stop_time:.3f}s")
                     except:
                         pass
         
@@ -218,7 +265,53 @@ class RobotController:
         if self.joystick.get_button(0):  # A button
             if self.emergency_stop:
                 self.emergency_stop = False
-                print("Emergency stop RELEASED - Robot ready")
+                print("✓ Emergency stop RELEASED - Robot ready")
+    
+    def log_latency_stats(self):
+        """Log latency statistics periodically"""
+        current_time = time.time()
+        if current_time - self.last_latency_log >= LATENCY_LOG_INTERVAL:
+            # Calculate statistics
+            if self.joystick_read_times:
+                self.avg_joystick_time = statistics.mean(self.joystick_read_times) * 1000
+                max_joystick = max(self.joystick_read_times) * 1000
+            else:
+                self.avg_joystick_time = 0
+                max_joystick = 0
+            
+            if self.motor_command_times:
+                self.avg_motor_time = statistics.mean(self.motor_command_times) * 1000
+                max_motor = max(self.motor_command_times) * 1000
+            else:
+                self.avg_motor_time = 0
+                max_motor = 0
+            
+            if self.total_loop_times:
+                self.avg_loop_time = statistics.mean(self.total_loop_times) * 1000
+                max_loop = max(self.total_loop_times) * 1000
+                avg_fps = 1000 / self.avg_loop_time if self.avg_loop_time > 0 else 0
+            else:
+                self.avg_loop_time = 0
+                max_loop = 0
+                avg_fps = 0
+            
+            if self.motor_update_interval:
+                self.avg_update_rate = 1.0 / statistics.mean(self.motor_update_interval)
+            else:
+                self.avg_update_rate = 0
+            
+            # Log to console
+            print(f"\n=== Latency Report ({self.command_counter} commands) ===")
+            print(f"Joystick Read:  avg={self.avg_joystick_time:.2f}ms  max={max_joystick:.2f}ms")
+            print(f"Motor Command:  avg={self.avg_motor_time:.2f}ms   max={max_motor:.2f}ms")
+            print(f"Total Loop:     avg={self.avg_loop_time:.2f}ms   max={max_loop:.2f}ms")
+            print(f"Actual FPS:     {avg_fps:.1f} Hz")
+            print(f"Motor Updates:  {self.avg_update_rate:.1f} Hz")
+            if self.motor_timeouts > 0:
+                print(f"⚠ Motor timeouts: {self.motor_timeouts}")
+            print("=" * 40)
+            
+            self.last_latency_log = current_time
     
     def draw_joystick_arrow(self):
         """Draw the joystick direction arrow"""
@@ -302,6 +395,47 @@ class RobotController:
         pygame.draw.rect(self.screen, CIRCLE_COLOR, (left_x, left_y - 100, 40, 100), 2)
         pygame.draw.rect(self.screen, CIRCLE_COLOR, (right_x, right_y - 100, 40, 100), 2)
     
+    def draw_latency_display(self):
+        """Draw latency information on screen"""
+        # Latency box
+        latency_x = WINDOW_WIDTH - 250
+        latency_y = 100
+        
+        # Title
+        title = self.font.render("LATENCY MONITOR", True, (200, 200, 255))
+        self.screen.blit(title, (latency_x, latency_y))
+        
+        # Stats
+        stats = [
+            f"Joystick: {self.avg_joystick_time:.1f}ms",
+            f"Motor Cmd: {self.avg_motor_time:.1f}ms",
+            f"Loop Time: {self.avg_loop_time:.1f}ms",
+            f"Motor Rate: {self.avg_update_rate:.1f}Hz",
+            f"Commands: {self.command_counter}",
+        ]
+        
+        if self.motor_timeouts > 0:
+            stats.append(f"Timeouts: {self.motor_timeouts}")
+        
+        y_offset = latency_y + 30
+        for stat in stats:
+            # Color code based on latency
+            if "Motor Cmd" in stat and self.avg_motor_time > 50:
+                color = (255, 100, 100)  # Red for high latency
+            elif "Motor Cmd" in stat and self.avg_motor_time > 20:
+                color = (255, 255, 100)  # Yellow for medium latency
+            else:
+                color = TEXT_COLOR
+            
+            surface = self.small_font.render(stat, True, color)
+            self.screen.blit(surface, (latency_x, y_offset))
+            y_offset += 22
+        
+        # Draw warning if motor commands are slow
+        if self.max_motor_time > 100:  # 100ms
+            warning = self.font.render(f"⚠ MAX DELAY: {self.max_motor_time:.0f}ms", True, (255, 50, 50))
+            self.screen.blit(warning, (latency_x - 20, y_offset + 10))
+    
     def draw_ui(self):
         """Draw UI elements"""
         # Draw center circle and reference elements
@@ -317,7 +451,7 @@ class RobotController:
                         (CENTER_X, CENTER_Y + ARROW_MAX_LENGTH), 1)
         
         # Title
-        title = self.large_font.render("Xbox VESC Robot Controller", True, TEXT_COLOR)
+        title = self.large_font.render("Xbox VESC Robot - Direct Control", True, TEXT_COLOR)
         title_rect = title.get_rect(center=(CENTER_X, 30))
         self.screen.blit(title, title_rect)
         
@@ -363,28 +497,26 @@ class RobotController:
         for control in controls:
             color = TEXT_COLOR if not control.startswith("CONTROLS") else (200, 200, 255)
             surface = self.font.render(control, True, color)
-            self.screen.blit(surface, (CENTER_X + 200, y_offset))
+            self.screen.blit(surface, (CENTER_X + 100, y_offset))
             y_offset += 22
     
     def cleanup(self):
         """Clean shutdown of VESC connections"""
-        self.running = False
-        
         if self.vesc_connected:
             try:
-                print("Stopping motors...")
+                print("\nStopping motors...")
+                start = time.time()
                 self.vesc1.set_duty_cycle(0)
                 self.vesc2.set_duty_cycle(0)
-                time.sleep(0.1)  # Give time for stop command
+                stop_time = time.time() - start
+                print(f"  Motors stopped in {stop_time:.3f}s")
                 
                 print("Closing VESC connections...")
                 self.vesc1.close()
                 self.vesc2.close()
+                print("  Connections closed")
             except Exception as e:
                 print(f"Error during cleanup: {e}")
-        
-        if self.motor_thread and self.motor_thread.is_alive():
-            self.motor_thread.join(timeout=1.0)
         
         pygame.quit()
     
@@ -394,17 +526,20 @@ class RobotController:
             print("Cannot start - no joystick connected!")
             return
         
-        print("\n=== Xbox VESC Robot Controller ===")
+        print("\n=== Xbox VESC Robot Controller - Direct Control ===")
         print("Left joystick controls robot movement")
         print("A button: Release emergency stop")
         print("B button: Emergency stop")
         print("ESC: Exit")
-        print("=====================================\n")
+        print("Latency statistics logged every second")
+        print("===================================================\n")
         
         running = True
         
         try:
             while running:
+                loop_start = time.time()
+                
                 # Handle events
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
@@ -415,13 +550,16 @@ class RobotController:
                         elif event.key == pygame.K_SPACE:
                             # Space bar emergency stop
                             self.emergency_stop = True
-                            print("EMERGENCY STOP (Spacebar)")
+                            print("🛑 EMERGENCY STOP (Spacebar)")
                     elif event.type == pygame.JOYBUTTONDOWN:
                         print(f"Button {event.button} pressed")
                 
                 # Update controller state
                 self.update_joystick_state()
                 self.handle_buttons()
+                
+                # Log latency statistics periodically
+                self.log_latency_stats()
                 
                 # Clear screen
                 self.screen.fill(BACKGROUND_COLOR)
@@ -430,20 +568,37 @@ class RobotController:
                 self.draw_ui()
                 self.draw_joystick_arrow()
                 self.draw_motor_indicators()
+                self.draw_latency_display()
                 
                 # Update display
                 pygame.display.flip()
-                self.clock.tick(60)  # 60 FPS
+                
+                # Track total loop time
+                loop_time = time.time() - loop_start
+                self.total_loop_times.append(loop_time)
+                
+                self.clock.tick(60)  # 60 FPS target
                 
         except KeyboardInterrupt:
             print("\nKeyboard interrupt received...")
         finally:
+            # Final statistics
+            print("\n=== Final Statistics ===")
+            print(f"Total commands sent: {self.command_counter}")
+            if self.motor_command_times:
+                print(f"Average motor latency: {self.avg_motor_time:.2f}ms")
+                print(f"Max motor latency: {self.max_motor_time*1000:.2f}ms")
+            if self.motor_timeouts > 0:
+                print(f"Total timeouts: {self.motor_timeouts}")
+            print("========================")
+            
             self.cleanup()
             print("Exited cleanly.")
 
 if __name__ == "__main__":
-    print("Xbox VESC Robot Controller")
-    print("Make sure Xbox controller and VESC motors are connected")
+    print("Xbox VESC Robot Controller - Direct Control Version")
+    print("This version sends commands directly to motors without threading")
+    print("Make sure Xbox controller and VESC motors are connected\n")
     
     try:
         controller = RobotController()
