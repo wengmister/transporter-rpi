@@ -187,7 +187,7 @@ class RobotController:
         """Calculate differential drive and directly send to motors with timing"""
         # Calculate differential drive values
         self.speed = self.y_axis * SPEED_MULTIPLIER  # Forward/backward
-        self.turn = self.x_axis * SPEED_MULTIPLIER   # Left/right turn
+        self.turn = -self.x_axis * SPEED_MULTIPLIER   # Left/right turn - 0829:inverted
         
         # Differential steering calculation
         left_speed = self.speed + self.turn
